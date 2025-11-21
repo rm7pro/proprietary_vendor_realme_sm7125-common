@@ -1,0 +1,202 @@
+name: Update vendor-files.mk
+
+on:
+  push:
+    branches:
+      - beta
+    paths:
+      - 'proprietary/**'
+
+jobs:
+  update-mk-file:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Update vendor-files.mk (Append Mode)
+        run: |
+          python3 << 'EOF'
+          import os
+          import re
+          from pathlib import Path
+
+          # Configuration
+          VENDOR_BASE = "vendor/realme/sm7125-common"
+          PROPRIETARY_DIR = "proprietary"
+          OUTPUT_FILE = "sm7125-common-vendor.mk"
+          
+          # Target copy out directories mapping
+          TARGET_MAPPING = {
+              "system": "TARGET_COPY_OUT_SYSTEM",
+              "system_ext": "TARGET_COPY_OUT_SYSTEM_EXT",
+              "product": "TARGET_COPY_OUT_PRODUCT",
+              "vendor": "TARGET_COPY_OUT_VENDOR",
+              "odm": "TARGET_COPY_OUT_ODM"
+          }
+
+          def parse_existing_mk():
+              """Parse existing MK file and extract all entries"""
+              existing_entries = set()
+              
+              if not os.path.exists(OUTPUT_FILE):
+                  print(f"{OUTPUT_FILE} not found, will create new file")
+                  return existing_entries
+              
+              with open(OUTPUT_FILE, 'r') as f:
+                  for line in f:
+                      line = line.strip()
+                      # Skip comments, empty lines, and PRODUCT_COPY_FILES line
+                      if not line or line.startswith('#') or 'PRODUCT_COPY_FILES' in line:
+                          continue
+                      
+                      # Remove trailing backslash
+                      line = line.rstrip(' \\')
+                      
+                      # Extract the file mapping (source:destination)
+                      if ':' in line:
+                          existing_entries.add(line.strip())
+              
+              return existing_entries
+
+          def scan_proprietary_files():
+              """Scan proprietary directory and generate file mappings"""
+              files = []
+              
+              if not os.path.exists(PROPRIETARY_DIR):
+                  print(f"Directory {PROPRIETARY_DIR} not found!")
+                  return files
+              
+              for root, dirs, filenames in os.walk(PROPRIETARY_DIR):
+                  for filename in filenames:
+                      file_path = os.path.join(root, filename)
+                      
+                      # Get relative path from proprietary directory
+                      rel_path = os.path.relpath(file_path, PROPRIETARY_DIR)
+                      
+                      # Determine target directory
+                      parts = rel_path.split(os.sep)
+                      if parts[0] in TARGET_MAPPING:
+                          target_var = TARGET_MAPPING[parts[0]]
+                          target_path = os.sep.join(parts[1:])
+                      else:
+                          # Default to vendor if no specific mapping
+                          target_var = "TARGET_COPY_OUT_VENDOR"
+                          target_path = rel_path
+                      
+                      # Create source and destination paths
+                      source = f"{VENDOR_BASE}/{PROPRIETARY_DIR}/{rel_path}"
+                      destination = f"$({target_var})/{target_path}"
+                      
+                      files.append(f"{source}:{destination}")
+              
+              return files
+
+          def merge_and_write_mk():
+              """Merge existing and new entries, then write to MK file"""
+              
+              # Parse existing entries
+              existing_entries = parse_existing_mk()
+              print(f"Found {len(existing_entries)} existing entries in {OUTPUT_FILE}")
+              
+              # Scan for new files
+              new_entries = scan_proprietary_files()
+              print(f"Found {len(new_entries)} files in {PROPRIETARY_DIR}")
+              
+              # Merge entries (set automatically handles duplicates)
+              all_entries = existing_entries.union(set(new_entries))
+              
+              # Sort for consistent output
+              sorted_entries = sorted(all_entries)
+              
+              # Calculate new additions
+              added_count = len(all_entries) - len(existing_entries)
+              
+              # Write to file
+              with open(OUTPUT_FILE, 'w') as f:
+                  f.write("# Automatically generated file. DO NOT MODIFY\n")
+                  f.write("#\n")
+                  f.write("# This file is auto-updated by GitHub Actions\n")
+                  f.write(f"# Total files: {len(sorted_entries)}\n")
+                  if added_count > 0:
+                      f.write(f"# New files added: {added_count}\n")
+                  f.write("\n")
+                  
+                  f.write("PRODUCT_COPY_FILES += \\\n")
+                  
+                  for i, entry in enumerate(sorted_entries):
+                      line = f"    {entry}"
+                      if i < len(sorted_entries) - 1:
+                          line += " \\"
+                      f.write(line + "\n")
+              
+              print(f"\n✅ Updated {OUTPUT_FILE}")
+              print(f"   Total entries: {len(sorted_entries)}")
+              print(f"   New additions: {added_count}")
+              
+              return added_count
+
+          if __name__ == "__main__":
+              added = merge_and_write_mk()
+              
+              # Exit with status for GitHub Actions
+              if added > 0:
+                  print(f"\n🎉 Successfully added {added} new entries!")
+              else:
+                  print("\n✨ No new files to add, MK file is up to date")
+
+          EOF
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if git diff --exit-code vendor-files.mk; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "No changes detected in vendor-files.mk"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Changes detected in vendor-files.mk"
+          fi
+
+      - name: Create summary
+        run: |
+          echo "## Vendor Files Update Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.check_changes.outputs.changed }}" == "true" ]; then
+            echo "✅ New files added to vendor-files.mk" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Changed Files:" >> $GITHUB_STEP_SUMMARY
+            echo '```diff' >> $GITHUB_STEP_SUMMARY
+            git diff vendor-files.mk >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✨ No new files to add" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Commit and push changes
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add vendor-files.mk
+          
+          # Count new additions for commit message
+          NEW_COUNT=$(git diff --cached vendor-files.mk | grep -c "^+" | grep -v "^+++" || echo "0")
+          
+          git commit -m "chore: Update vendor-files.mk with new entries
+
+- Added $NEW_COUNT new file(s) to vendor-files.mk
+- Auto-generated by GitHub Actions
+
+[skip ci]"
+          git push
